@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-multipart
+pandas
+openpyxl
+python-docx
+pdfplumber
+scikit-learn
+anthropic

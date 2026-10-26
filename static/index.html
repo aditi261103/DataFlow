@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DataFlow</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{--bg:#f3f5f4;--panel:#fff;--ink:#14231f;--muted:#5d6f69;--line:#d5ddda;--accent:#760f25;--accent-ink:#fff;--danger:#b42318}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1715;--panel:#17221f;--ink:#e6efec;--muted:#93a7a0;--line:#2a3a36;--accent:#2dd4bf;--accent-ink:#04211d;--danger:#f97066}}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.5 "Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--ink);display:grid;grid-template-columns:280px 1fr;min-height:100vh}
+aside{background:var(--panel);border-right:1px solid var(--line);padding:20px;display:flex;flex-direction:column;gap:14px}
+h1{font:700 26px Georgia,serif;margin:0}
+h2{font:600 17px Georgia,serif;margin:0 0 10px}
+main{padding:24px;display:flex;flex-direction:column;gap:20px;min-width:0}
+section{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:18px}
+button,select,input{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:7px 10px}
+button{cursor:pointer}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+button.link{border:0;background:none;color:var(--danger);padding:2px 6px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.drop{border:2px dashed var(--line);border-radius:6px;padding:18px;text-align:center;color:var(--muted);cursor:pointer}
+.drop.over{border-color:var(--accent);color:var(--ink)}
+.ds{display:flex;justify-content:space-between;align-items:center;gap:6px;padding:8px 0;border-bottom:1px solid var(--line)}
+.ds small{display:block;color:var(--muted)}
+.ds span{overflow-wrap:anywhere}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.row input[type=text]{flex:1;min-width:200px}
+.chartbox{position:relative;height:300px}
+.saved{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+.saved .chartbox{height:190px}
+.saved header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+#log{display:flex;flex-direction:column;gap:10px;max-height:420px;overflow:auto;margin-bottom:12px}
+.msg{padding:10px 12px;border-radius:6px;background:var(--bg);white-space:pre-wrap}
+.msg.me{background:var(--accent);color:var(--accent-ink);align-self:flex-end}
+details{margin-top:8px;color:var(--muted);font-size:13px}
+pre{overflow:auto;margin:6px 0}
+table{border-collapse:collapse;font-size:13px}
+td,th{border:1px solid var(--line);padding:3px 8px;text-align:left}
+.empty{color:var(--muted)}
+@media(max-width:800px){body{grid-template-columns:1fr}aside{border-right:0;border-bottom:1px solid var(--line)}}
+</style>
+</head>
+<body>
+<aside>
+  <h1>DataFlow</h1>
+  <label class="drop" id="drop">Drop a file or click to upload<br><small>CSV, JSON, Excel, Word, PDF, TXT</small>
+    <input id="file" type="file" hidden accept=".csv,.json,.xlsx,.xls,.docx,.pdf,.txt"></label>
+  <div id="status" class="empty" role="status"></div>
+  <div id="datasets"></div>
+</aside>
+<main>
+  <section>
+    <h2>Build a chart</h2>
+    <div class="row">
+      <input type="text" id="prompt" placeholder="Describe it: total sales by region">
+      <button id="aiChart">Suggest chart</button>
+    </div>
+    <div class="row">
+      <select id="ds"></select>
+      <select id="type"><option>bar</option><option>line</option><option>pie</option></select>
+      <select id="x" aria-label="X column"></select>
+      <select id="y" aria-label="Y column"></select>
+      <select id="agg"><option>sum</option><option>avg</option><option>count</option><option>min</option><option>max</option></select>
+      <button class="primary" id="draw">Draw</button>
+      <button id="save">Save chart</button>
+    </div>
+    <div class="chartbox"><canvas id="main"></canvas></div>
+  </section>
+  <section><h2>Saved charts</h2><div id="saved" class="saved"></div></section>
+  <section>
+    <h2>Ask your data</h2>
+    <div id="log"></div>
+    <div class="row"><input type="text" id="q" placeholder="Which region had the highest sales? What does the contract say about renewal?"><button class="primary" id="ask">Ask</button></div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let DS = [], charts = {};
+const PAL = ["#0f766e","#d97706","#4f46e5","#be123c","#0891b2","#65a30d","#9333ea","#475569"];
+
+async function api(path, opts = {}) {
+  const r = await fetch("/api" + path, opts);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.detail || "Request failed");
+  return j;
+}
+const post = (p, body) => api(p, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+const say = t => $("status").textContent = t;
+
+function render(canvas, cfg, data) {
+  charts[canvas.id]?.destroy();
+  const pie = cfg.type === "pie";
+  charts[canvas.id] = new Chart(canvas, {type: cfg.type,
+    data: {labels: data.labels, datasets: [{label: cfg.y || "count", data: data.values,
+      backgroundColor: pie ? PAL : PAL[0], borderColor: PAL[0]}]},
+    options: {maintainAspectRatio: false, plugins: {legend: {display: pie}}}});
+}
+
+function listDatasets() {
+  $("datasets").innerHTML = DS.length ? "" : '<p class="empty">No data yet. Upload a file to start.</p>';
+  DS.forEach(d => {
+    const el = document.createElement("div"); el.className = "ds";
+    el.innerHTML = `<span>${d.name.replace(/</g,"&lt;")}<small>${d.kind === "table" ? d.rows + " rows" : "document"}</small></span>`;
+    const b = document.createElement("button"); b.className = "link"; b.textContent = "Delete";
+    b.onclick = async () => { if (confirm(`Delete ${d.name} and its saved charts?`)) { await api("/datasets/" + d.id, {method: "DELETE"}); await refresh(); } };
+    el.append(b); $("datasets").append(el);
+  });
+  const tables = DS.filter(d => d.kind === "table");
+  $("ds").innerHTML = tables.map(d => `<option value="${d.id}">${d.name}</option>`).join("");
+  fillCols();
+}
+function fillCols() {
+  const d = DS.find(d => d.id == $("ds").value);
+  const opts = (d?.columns || []).map(c => `<option>${c}</option>`).join("");
+  $("x").innerHTML = opts; $("y").innerHTML = "<option value=''>(none)</option>" + opts;
+}
+const cfg = () => ({type: $("type").value, x: $("x").value, y: $("y").value || null, agg: $("agg").value});
+
+async function refresh() {
+  DS = await api("/datasets"); listDatasets(); await loadSaved();
+}
+async function loadSaved() {
+  const list = await api("/charts"); $("saved").innerHTML = list.length ? "" : '<p class="empty">Nothing saved. Draw a chart and choose Save chart.</p>';
+  for (const c of list) {
+    const box = document.createElement("div");
+    box.innerHTML = `<header><strong>${c.title.replace(/</g,"&lt;")}</strong></header><div class="chartbox"><canvas id="c${c.id}"></canvas></div>`;
+    const del = document.createElement("button"); del.className = "link"; del.textContent = "Delete";
+    del.onclick = async () => { await api("/charts/" + c.id, {method: "DELETE"}); loadSaved(); };
+    box.firstChild.append(del); $("saved").append(box);
+    post("/chart", {dataset_id: c.dataset_id, ...c.config}).then(d => render($("c" + c.id), c.config, d)).catch(() => {});
+  }
+}
+
+$("ds").onchange = fillCols;
+$("draw").onclick = async () => {
+  try { render($("main"), cfg(), await post("/chart", {dataset_id: +$("ds").value, ...cfg()})); say(""); }
+  catch (e) { say(e.message); }
+};
+$("aiChart").onclick = async () => {
+  try {
+    say("Asking Claude…");
+    const s = await post("/chart/suggest", {dataset_id: +$("ds").value, prompt: $("prompt").value});
+    $("type").value = s.type; $("x").value = s.x; $("y").value = s.y || ""; $("agg").value = s.agg;
+    $("prompt").dataset.title = s.title || ""; $("draw").click();
+  } catch (e) { say(e.message); }
+};
+$("save").onclick = async () => {
+  const title = prompt("Chart title", $("prompt").dataset.title || `${$("agg").value} of ${$("y").value || "rows"} by ${$("x").value}`);
+  if (title) { await post("/charts", {dataset_id: +$("ds").value, title, config: cfg()}); loadSaved(); }
+};
+
+async function upload(f) {
+  if (!f) return; say("Uploading " + f.name + "…");
+  const fd = new FormData(); fd.append("file", f);
+  try { DS = await api("/upload", {method: "POST", body: fd}); listDatasets(); await loadSaved(); say("Added " + f.name); }
+  catch (e) { say(e.message); }
+}
+$("file").onchange = e => upload(e.target.files[0]);
+$("drop").ondragover = e => { e.preventDefault(); $("drop").classList.add("over"); };
+$("drop").ondragleave = () => $("drop").classList.remove("over");
+$("drop").ondrop = e => { e.preventDefault(); $("drop").classList.remove("over"); upload(e.dataTransfer.files[0]); };
+
+function bubble(text, me) {
+  const d = document.createElement("div"); d.className = "msg" + (me ? " me" : ""); d.textContent = text;
+  $("log").append(d); $("log").scrollTop = 1e9; return d;
+}
+$("ask").onclick = async () => {
+  const q = $("q").value.trim(); if (!q) return; $("q").value = ""; bubble(q, true);
+  const b = bubble("Thinking…");
+  try {
+    const r = await post("/ask", {question: q}); b.textContent = r.answer;
+    if (r.sources.length) b.append("\n\nSources: " + r.sources.join(", "));
+    if (r.sql) {
+      const det = document.createElement("details"); det.innerHTML = "<summary>SQL and rows</summary>";
+      const pre = document.createElement("pre"); pre.textContent = r.sql; det.append(pre);
+      if (r.result) {
+        const t = document.createElement("table");
+        t.innerHTML = "<tr>" + r.result.columns.map(c => `<th>${c}</th>`).join("") + "</tr>";
+        r.result.rows.slice(0, 20).forEach(row => { const tr = t.insertRow(); row.forEach(v => tr.insertCell().textContent = v); });
+        det.append(t);
+      }
+      if (r.error) det.append("Error: " + r.error);
+      b.append(det);
+    }
+  } catch (e) { b.textContent = e.message; }
+};
+$("q").onkeydown = e => { if (e.key === "Enter") $("ask").click(); };
+refresh();
+</script>
+</body>
+</html>
